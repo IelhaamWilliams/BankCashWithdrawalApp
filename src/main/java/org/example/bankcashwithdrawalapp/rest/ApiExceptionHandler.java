@@ -1,6 +1,7 @@
 package org.example.bankcashwithdrawalapp.rest;
 
 import org.example.bankcashwithdrawalapp.exception.AccountNotFoundException;
+import org.example.bankcashwithdrawalapp.exception.ConcurrentWithdrawalException;
 import org.example.bankcashwithdrawalapp.exception.InsufficientFundsException;
 import org.example.bankcashwithdrawalapp.exception.InvalidWithdrawalException;
 import org.springframework.http.HttpStatus;
@@ -37,6 +38,12 @@ public class ApiExceptionHandler {
     public ResponseEntity<ApiError> handleInsufficientFunds(InsufficientFundsException exception) {
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
                 .body(new ApiError("INSUFFICIENT_FUNDS", exception.getMessage()));
+    }
+
+    @ExceptionHandler(ConcurrentWithdrawalException.class)
+    public ResponseEntity<ApiError> handleConcurrentWithdrawal(ConcurrentWithdrawalException exception) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ApiError("CONCURRENT_WITHDRAWAL", exception.getMessage()));
     }
 
     public record ApiError(String code, String message) {

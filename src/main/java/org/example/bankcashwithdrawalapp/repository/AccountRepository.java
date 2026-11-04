@@ -1,33 +1,23 @@
 package org.example.bankcashwithdrawalapp.repository;
 
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.example.bankcashwithdrawalapp.entity.Accounts;
+import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 import java.math.BigDecimal;
 
 @Repository
-public class AccountRepository {
-    private final JdbcTemplate jdbcTemplate;
+public interface AccountRepository extends JpaRepository<Accounts, Long> {
+    default boolean debitIfVersionMatches(Long accountId, BigDecimal amount, Long expectedVersion) {
+        Accounts account = findById(accountId).orElse(null);
+        if (account == null
+                || !account.getVersion().equals(expectedVersion)
+                || account.getBalance().compareTo(amount) < 0) {
+            return false;
+        }
 
-    public AccountRepository(JdbcTemplate jdbcTemplate) {
-        this.jdbcTemplate = jdbcTemplate;
-    }
-
-    public int debitIfSufficient(Long accountId, BigDecimal amount) {
-        return jdbcTemplate.update(
-                "UPDATE accounts SET balance = balance - ? WHERE id = ? AND balance >= ?",
-                amount,
-                accountId,
-                amount
-        );
-    }
-
-    public boolean existsById(Long accountId) {
-        Integer count = jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM accounts WHERE id = ?",
-                Integer.class,
-                accountId
-        );
-        return count != null && count > 0;
+        account.setBalance(account.getBalance().subtract(amount));
+        saveAndFlush(account);
+        return true;
     }
 }

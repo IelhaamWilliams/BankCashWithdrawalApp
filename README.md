@@ -66,6 +66,7 @@ Errors use a JSON body with `code` and `message`:
 | `400 Bad Request` | `INVALID_REQUEST` | A required parameter is missing or malformed |
 | `400 Bad Request` | `INVALID_WITHDRAWAL` | The account ID or amount is invalid |
 | `404 Not Found` | `ACCOUNT_NOT_FOUND` | No account has the supplied ID |
+| `409 Conflict` | `CONCURRENT_WITHDRAWAL` | The account changed repeatedly during optimistic-lock retries; retry the request |
 | `422 Unprocessable Entity` | `INSUFFICIENT_FUNDS` | The account does not have enough funds |
 
 ## Database configuration
@@ -90,9 +91,17 @@ INSERT INTO accounts (id, balance) VALUES (101, 250.00);
 
 `SQL_INIT_MODE` controls Spring SQL initialization and defaults to `always`.
 
+## Account auditing
+
+The `Accounts` entity is audited with Hibernate Envers. Account changes made through the JPA entity are recorded in `accounts_AUD`, with revision metadata stored in `REVINFO`. The audit tables are included in `schema.sql` because Hibernate schema generation is disabled.
+
+`AccountsAuditService.getAuditHistory(accountId)` returns the recorded revisions for an account, newest first, including the revision number and timestamp, revision type, balance, and version. The service is available for application use; no audit-history HTTP endpoint is currently exposed.
+
 ## Outbox and SNS delivery
 
 The account debit and outbox insert run in the same transaction. A scheduled dispatcher claims pending outbox rows and publishes them to SNS. Failed publishes are returned to the pending state with exponential retry delays, capped at five minutes. Published messages include the stable outbox event ID as an SNS message attribute.
+
+Accounts have a `version` column. The account repository reads a balance/version snapshot and debits with a compare-and-set update that requires the version to remain unchanged, increments it on success, and checks that the balance covers the withdrawal. On a version conflict, the service reloads the account and retries; if the bounded retries are exhausted, the API returns `409 Conflict`. This prevents concurrent requests from spending the same funds. Outbox claims use conditional updates and per-claim lock tokens so concurrent dispatchers cannot own the same active claim, and an expired worker cannot update a claim after another worker has reclaimed it.
 
 Delivery is **at least once**: a process failure after SNS accepts a message but before the outbox row is marked published can cause the message to be sent again. Consumers should deduplicate using the event ID.
 
@@ -117,7 +126,7 @@ org.example.bankcashwithdrawalapp
 ├── messaging    SNS publisher interface and implementation
 ├── repository   Account and outbox persistence
 ├── rest         HTTP controller, response DTO, and API error handling
-└── service      Transactional withdrawal flow and outbox dispatcher
+└── service      Withdrawal, audit-history query, and outbox dispatcher
 ```
 
 ## Tests
@@ -128,4 +137,4 @@ Run the test suite with:
 ./gradlew test
 ```
 
-The integration tests use H2 and cover successful withdrawals, validation, missing accounts, insufficient funds, and outbox dispatch/retry behavior.
+The integration tests use H2 and cover successful withdrawals, validation, missing accounts, insufficient funds, account audit history, concurrent withdrawals, competing outbox claims, and dispatch/retry behavior.

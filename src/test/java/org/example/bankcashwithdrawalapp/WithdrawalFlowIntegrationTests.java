@@ -1,21 +1,34 @@
 package org.example.bankcashwithdrawalapp;
 
 import org.example.bankcashwithdrawalapp.exception.InvalidWithdrawalException;
+import org.example.bankcashwithdrawalapp.exception.InsufficientFundsException;
+import org.example.bankcashwithdrawalapp.entity.Accounts;
 import org.example.bankcashwithdrawalapp.messaging.WithdrawalEventPublisher;
+import org.example.bankcashwithdrawalapp.repository.AccountRepository;
 import org.example.bankcashwithdrawalapp.repository.OutboxRepository;
 import org.example.bankcashwithdrawalapp.rest.ApiExceptionHandler;
 import org.example.bankcashwithdrawalapp.rest.BankAccountController;
+import org.example.bankcashwithdrawalapp.service.AccountsAuditService;
 import org.example.bankcashwithdrawalapp.service.OutboxDispatcher;
 import org.example.bankcashwithdrawalapp.service.WithdrawalService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.hamcrest.Matchers.emptyString;
@@ -41,11 +54,19 @@ class WithdrawalFlowIntegrationTests {
     @Autowired
     private OutboxRepository outboxRepository;
 
+    @Autowired
+    private AccountRepository accountRepository;
+
+    @Autowired
+    private AccountsAuditService accountsAuditService;
+
     private MockMvc mockMvc;
 
     @BeforeEach
     void setUp() {
         jdbcTemplate.update("DELETE FROM withdrawal_outbox");
+        jdbcTemplate.update("DELETE FROM accounts_AUD");
+        jdbcTemplate.update("DELETE FROM REVINFO");
         jdbcTemplate.update("DELETE FROM accounts");
         jdbcTemplate.update("INSERT INTO accounts (id, balance) VALUES (?, ?)", ACCOUNT_ID, "100.00");
         mockMvc = MockMvcBuilders.standaloneSetup(new BankAccountController(withdrawalService))
@@ -68,6 +89,32 @@ class WithdrawalFlowIntegrationTests {
                 jdbcTemplate.queryForObject("SELECT balance FROM accounts WHERE id = ?", BigDecimal.class, ACCOUNT_ID)
         ));
         assertEquals(1, countOutboxEvents());
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM accounts_AUD WHERE id = ? AND balance = ? AND REVTYPE = 1",
+                Integer.class,
+                ACCOUNT_ID,
+                new BigDecimal("74.50")
+        ));
+    }
+
+    @Test
+    void auditServiceReturnsAccountRevisionsNewestFirst() {
+        withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("25.50"));
+
+        List<AccountsAuditService.AccountsAuditEntry> history =
+                accountsAuditService.getAuditHistory(ACCOUNT_ID);
+
+        assertEquals(1, history.size());
+        assertEquals(ACCOUNT_ID, history.getFirst().accountId());
+        assertEquals(0, new BigDecimal("74.50").compareTo(history.getFirst().balance()));
+        assertNotNull(history.getFirst().revisionNumber());
+        assertNotNull(history.getFirst().revisionTimestamp());
+        assertEquals(org.hibernate.envers.RevisionType.MOD, history.getFirst().revisionType());
+    }
+
+    @Test
+    void auditServiceReturnsEmptyHistoryForAccountWithoutAuditedChanges() {
+        assertTrue(accountsAuditService.getAuditHistory(ACCOUNT_ID).isEmpty());
     }
 
     @Test
@@ -175,6 +222,80 @@ class WithdrawalFlowIntegrationTests {
     void invalidWithdrawalDoesNotChangeBalanceOrCreateEvent() {
         assertThrows(InvalidWithdrawalException.class,
                 () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("-1.00")));
+    }
+
+    @Test
+    @Transactional
+    void staleAccountVersionCannotDebitBalance() {
+        Accounts snapshot = accountRepository.findById(ACCOUNT_ID).orElseThrow();
+        jdbcTemplate.update(
+                "UPDATE accounts SET balance = balance - ?, version = version + 1 WHERE id = ?",
+                new BigDecimal("10.00"),
+                ACCOUNT_ID
+        );
+
+        assertThrows(OptimisticLockingFailureException.class,
+                () -> accountRepository.debitIfVersionMatches(
+                        ACCOUNT_ID,
+                        new BigDecimal("20.00"),
+                        snapshot.getVersion()
+                ));
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT version FROM accounts WHERE id = ?",
+                Integer.class,
+                ACCOUNT_ID
+        ));
+        assertEquals(0, new BigDecimal("90.00").compareTo(
+                jdbcTemplate.queryForObject("SELECT balance FROM accounts WHERE id = ?", BigDecimal.class, ACCOUNT_ID)
+        ));
+    }
+
+    @Test
+    void concurrentWithdrawalsRetryOptimisticConflictsWithoutOverdrawing() throws Exception {
+        int requestCount = 8;
+        CountDownLatch ready = new CountDownLatch(requestCount);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(requestCount);
+        try {
+            List<Future<Boolean>> results = new ArrayList<>();
+            for (int i = 0; i < requestCount; i++) {
+                results.add(executor.submit(() -> {
+                    ready.countDown();
+                    if (!start.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Timed out waiting to start concurrent withdrawals");
+                    }
+                    try {
+                        withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("15.00"));
+                        return true;
+                    } catch (InsufficientFundsException exception) {
+                        return false;
+                    }
+                }));
+            }
+
+            assertTrue(ready.await(10, TimeUnit.SECONDS), "Withdrawal workers did not become ready");
+            start.countDown();
+
+            int successfulWithdrawals = 0;
+            for (Future<Boolean> result : results) {
+                if (result.get(30, TimeUnit.SECONDS)) {
+                    successfulWithdrawals++;
+                }
+            }
+
+            assertEquals(6, successfulWithdrawals);
+            assertEquals(0, new BigDecimal("10.00").compareTo(
+                    jdbcTemplate.queryForObject("SELECT balance FROM accounts WHERE id = ?", BigDecimal.class, ACCOUNT_ID)
+            ));
+            assertEquals(6, jdbcTemplate.queryForObject(
+                    "SELECT version FROM accounts WHERE id = ?",
+                    Integer.class,
+                    ACCOUNT_ID
+            ));
+            assertEquals(6, countOutboxEvents());
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private int countOutboxEvents() {

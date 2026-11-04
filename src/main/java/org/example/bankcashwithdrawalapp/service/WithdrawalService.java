@@ -2,12 +2,18 @@ package org.example.bankcashwithdrawalapp.service;
 
 import org.example.bankcashwithdrawalapp.event.WithdrawalEvent;
 import org.example.bankcashwithdrawalapp.exception.AccountNotFoundException;
+import org.example.bankcashwithdrawalapp.exception.ConcurrentWithdrawalException;
 import org.example.bankcashwithdrawalapp.exception.InsufficientFundsException;
 import org.example.bankcashwithdrawalapp.exception.InvalidWithdrawalException;
+import org.example.bankcashwithdrawalapp.entity.Accounts;
 import org.example.bankcashwithdrawalapp.repository.AccountRepository;
 import org.example.bankcashwithdrawalapp.repository.OutboxRepository;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Recover;
+import org.springframework.retry.annotation.Retryable;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -25,14 +31,34 @@ public class WithdrawalService {
     }
 
     @Transactional
+    @Retryable(
+            retryFor = {ConcurrentWithdrawalException.class, OptimisticLockingFailureException.class},
+            noRetryFor = {
+                    AccountNotFoundException.class,
+                    InsufficientFundsException.class,
+                    InvalidWithdrawalException.class
+            },
+            notRecoverable = {
+                    AccountNotFoundException.class,
+                    InsufficientFundsException.class,
+                    InvalidWithdrawalException.class
+            },
+            maxAttempts = 13,
+            backoff = @Backoff(delay = 10, maxDelay = 200, multiplier = 2)
+    )
     public WithdrawalEvent withdraw(Long accountId, BigDecimal amount) {
         amount = validateAndNormalize(accountId, amount);
 
-        if (accountRepository.debitIfSufficient(accountId, amount) != 1) {
-            if (!accountRepository.existsById(accountId)) {
-                throw new AccountNotFoundException(accountId);
-            }
+        var account = accountRepository.findById(accountId);
+        if (account.isEmpty()) {
+            throw new AccountNotFoundException(accountId);
+        }
+        Accounts snapshot = account.get();
+        if (snapshot.getBalance().compareTo(amount) < 0) {
             throw new InsufficientFundsException(accountId);
+        }
+        if (!accountRepository.debitIfVersionMatches(accountId, amount, snapshot.getVersion())) {
+            throw new ConcurrentWithdrawalException(accountId);
         }
 
         WithdrawalEvent event = new WithdrawalEvent(
@@ -44,6 +70,15 @@ public class WithdrawalService {
         );
         outboxRepository.enqueue(event);
         return event;
+    }
+
+    @Recover
+    public WithdrawalEvent recoverOptimisticLock(
+            OptimisticLockingFailureException exception,
+            Long accountId,
+            BigDecimal amount
+    ) {
+        throw new ConcurrentWithdrawalException(accountId);
     }
 
     private BigDecimal validateAndNormalize(Long accountId, BigDecimal amount) {
