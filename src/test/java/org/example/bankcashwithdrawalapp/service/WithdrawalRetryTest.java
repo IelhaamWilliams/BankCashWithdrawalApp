@@ -1,5 +1,7 @@
 package org.example.bankcashwithdrawalapp.service;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.example.bankcashwithdrawalapp.entity.Accounts;
 import org.example.bankcashwithdrawalapp.exception.ConcurrentWithdrawalException;
 import org.example.bankcashwithdrawalapp.event.WithdrawalEvent;
@@ -129,9 +131,17 @@ class WithdrawalRetryTest {
         WithdrawalTransactionService withdrawalTransactionService(
                 AccountRepository accountRepository,
                 OutboxRepository outboxRepository,
-                WithdrawalIdempotencyRepository idempotencyRepository
+                WithdrawalIdempotencyRepository idempotencyRepository,
+                MeterRegistry meterRegistry
         ) {
-            return new WithdrawalTransactionService(accountRepository, outboxRepository, idempotencyRepository);
+            return new WithdrawalTransactionService(
+                    accountRepository, outboxRepository, idempotencyRepository, meterRegistry
+            );
+        }
+
+        @Bean
+        MeterRegistry meterRegistry() {
+            return new SimpleMeterRegistry();
         }
     }
 }

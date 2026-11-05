@@ -1,5 +1,6 @@
 package org.example.bankcashwithdrawalapp.service;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.example.bankcashwithdrawalapp.entity.Accounts;
 import org.example.bankcashwithdrawalapp.event.WithdrawalEvent;
 import org.example.bankcashwithdrawalapp.exception.AccountNotFoundException;
@@ -34,14 +35,16 @@ class WithdrawalTransactionServiceTest {
     private OutboxRepository outboxRepository;
     private WithdrawalIdempotencyRepository idempotencyRepository;
     private WithdrawalTransactionService withdrawalService;
+    private SimpleMeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
         accountRepository = mock(AccountRepository.class);
         outboxRepository = mock(OutboxRepository.class);
         idempotencyRepository = mock(WithdrawalIdempotencyRepository.class);
+        meterRegistry = new SimpleMeterRegistry();
         withdrawalService = new WithdrawalTransactionService(
-                accountRepository, outboxRepository, idempotencyRepository
+                accountRepository, outboxRepository, idempotencyRepository, meterRegistry
         );
     }
 
@@ -67,6 +70,8 @@ class WithdrawalTransactionServiceTest {
         ArgumentCaptor<WithdrawalEvent> eventCaptor = ArgumentCaptor.forClass(WithdrawalEvent.class);
         verify(outboxRepository).enqueue(eventCaptor.capture());
         assertEquals(response, eventCaptor.getValue());
+        assertEquals(1.0, meterRegistry.get("bank.withdrawals")
+                .tag("outcome", "completed").counter().count());
     }
 
     @Test

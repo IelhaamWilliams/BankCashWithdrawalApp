@@ -13,6 +13,14 @@ A Java 21 / Spring Boot REST API for bank account withdrawals. The application v
 
 This project does **not** currently implement API authentication or account-ownership authorization. Do not expose the withdrawal endpoint to untrusted clients or use this application for real funds until those controls are added.
 
+## Logging and observability
+
+The application logs each HTTP request with its method, path, status, duration, and a generated `X-Request-Id`. The same request ID is placed in the logging MDC and returned in the response header so application and client-side diagnostics can be correlated. Query strings, withdrawal amounts, and idempotency keys are intentionally excluded from request logs. Expected API errors are logged by error code; unexpected failures include the stack trace and request ID while returning a generic `500` response.
+
+Withdrawal and outbox operations emit low-cardinality Micrometer counters, and SNS publishing records duration by outcome. This includes `bank.withdrawals` (completed, replayed, and retry exhaustion), `bank.outbox.publish` (published/failed), `bank.outbox.retry_scheduled`, and `bank.outbox.publish.duration`. Spring Boot Actuator provides `/actuator/health`, liveness/readiness health probes, and `/actuator/info`; web exposure defaults to health and info only. Metrics remain available to an in-process Micrometer registry and can be exposed for an authenticated/internal monitoring setup by setting `MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE=health,info,metrics`. Do not expose management endpoints publicly without access controls.
+
+Set `APP_LOG_LEVEL` to change the application package log level (default: `INFO`).
+
 ## Requirements
 
 - Java 21

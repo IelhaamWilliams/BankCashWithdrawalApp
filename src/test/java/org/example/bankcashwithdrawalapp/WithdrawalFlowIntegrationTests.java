@@ -1,5 +1,6 @@
 package org.example.bankcashwithdrawalapp;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.example.bankcashwithdrawalapp.exception.InvalidWithdrawalException;
 import org.example.bankcashwithdrawalapp.exception.InsufficientFundsException;
 import org.example.bankcashwithdrawalapp.entity.Accounts;
@@ -55,6 +56,9 @@ class WithdrawalFlowIntegrationTests {
 
     @Autowired
     private OutboxRepository outboxRepository;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @Autowired
     private AccountRepository accountRepository;
@@ -250,7 +254,9 @@ class WithdrawalFlowIntegrationTests {
         withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"), "dispatcher-publish-request");
         AtomicReference<String> publishedPayload = new AtomicReference<>();
         WithdrawalEventPublisher publisher = (eventId, payload) -> publishedPayload.set(payload);
-        OutboxDispatcher dispatcher = new OutboxDispatcher(outboxRepository, publisher, 10, 60, 1000);
+        OutboxDispatcher dispatcher = new OutboxDispatcher(
+                outboxRepository, publisher, meterRegistry, 10, 60, 1000
+        );
 
         dispatcher.dispatchPendingEvents();
 
@@ -268,7 +274,9 @@ class WithdrawalFlowIntegrationTests {
         WithdrawalEventPublisher publisher = (eventId, payload) -> {
             throw new IllegalStateException("SNS unavailable");
         };
-        OutboxDispatcher dispatcher = new OutboxDispatcher(outboxRepository, publisher, 10, 60, 1000);
+        OutboxDispatcher dispatcher = new OutboxDispatcher(
+                outboxRepository, publisher, meterRegistry, 10, 60, 1000
+        );
 
         dispatcher.dispatchPendingEvents();
 

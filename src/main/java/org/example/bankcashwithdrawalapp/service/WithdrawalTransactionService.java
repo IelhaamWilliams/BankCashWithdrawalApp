@@ -13,6 +13,7 @@ import org.example.bankcashwithdrawalapp.repository.WithdrawalIdempotencyReposit
 import org.example.bankcashwithdrawalapp.repository.WithdrawalIdempotencyRepository.StoredWithdrawal;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.retry.annotation.Backoff;
@@ -20,6 +21,7 @@ import org.springframework.retry.annotation.Recover;
 import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import io.micrometer.core.instrument.MeterRegistry;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -35,15 +37,18 @@ public class WithdrawalTransactionService {
     private final AccountRepository accountRepository;
     private final OutboxRepository outboxRepository;
     private final WithdrawalIdempotencyRepository idempotencyRepository;
+    private final MeterRegistry meterRegistry;
 
     public WithdrawalTransactionService(
             AccountRepository accountRepository,
             OutboxRepository outboxRepository,
-            WithdrawalIdempotencyRepository idempotencyRepository
+            WithdrawalIdempotencyRepository idempotencyRepository,
+            MeterRegistry meterRegistry
     ) {
         this.accountRepository = accountRepository;
         this.outboxRepository = outboxRepository;
         this.idempotencyRepository = idempotencyRepository;
+        this.meterRegistry = meterRegistry;
     }
 
     @Transactional
@@ -77,6 +82,8 @@ public class WithdrawalTransactionService {
             if (storedWithdrawal.amount().compareTo(amount) != 0) {
                 throw new IdempotencyKeyReuseException();
             }
+            meterRegistry.counter("bank.withdrawals", "outcome", "replayed").increment();
+            LOGGER.info("Withdrawal replayed eventId={} outcome=replayed", storedWithdrawal.event().eventId());
             return storedWithdrawal.event();
         }
 
@@ -103,6 +110,8 @@ public class WithdrawalTransactionService {
         }
 
         outboxRepository.enqueue(event);
+        meterRegistry.counter("bank.withdrawals", "outcome", "completed").increment();
+        LOGGER.info("Withdrawal completed eventId={} outcome=completed", event.eventId());
         return event;
     }
 
@@ -113,8 +122,9 @@ public class WithdrawalTransactionService {
             BigDecimal amount,
             String idempotencyKey
     ) {
-        LOGGER.error("Withdrawal failed after all retry attempts for account {}, reason: {}",
-                accountId, exception.getMessage());
+        LOGGER.error("Withdrawal retry attempts exhausted requestId={} cause={}",
+                MDC.get("requestId"), exception.getClass().getSimpleName());
+        meterRegistry.counter("bank.withdrawals", "outcome", "retry_exhausted").increment();
         throw new ConcurrentWithdrawalException(accountId);
     }
 
@@ -125,8 +135,9 @@ public class WithdrawalTransactionService {
             BigDecimal amount,
             String idempotencyKey
     ) {
-        LOGGER.error("Withdrawal failed after all retry attempts for account {}, reason: {}",
-                accountId, exception.getMessage());
+        LOGGER.error("Withdrawal retry attempts exhausted requestId={} cause={}",
+                MDC.get("requestId"), exception.getClass().getSimpleName());
+        meterRegistry.counter("bank.withdrawals", "outcome", "retry_exhausted").increment();
         throw exception;
     }
 
@@ -141,15 +152,17 @@ public class WithdrawalTransactionService {
         if (stored.isPresent()) {
             StoredWithdrawal existing = stored.get();
             if (existing.amount().compareTo(amount) == 0) {
-                LOGGER.info("Replaying successful withdrawal after concurrent idempotency-key retries for account {}",
-                        accountId);
+                LOGGER.info("Replaying withdrawal after concurrent idempotency-key retries requestId={}",
+                        MDC.get("requestId"));
+                meterRegistry.counter("bank.withdrawals", "outcome", "replayed").increment();
                 return existing.event();
             }
             throw new IdempotencyKeyReuseException();
         }
 
-        LOGGER.error("Unable to resolve concurrent withdrawal after duplicate-key retries for account {}",
-                accountId, exception);
+        LOGGER.error("Unable to resolve duplicate-key retries requestId={} cause={}",
+                MDC.get("requestId"), exception.getClass().getSimpleName());
+        meterRegistry.counter("bank.withdrawals", "outcome", "retry_exhausted").increment();
         throw new ConcurrentWithdrawalException(accountId);
     }
 
