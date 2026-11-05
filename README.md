@@ -1,6 +1,17 @@
 # Bank Cash Withdrawal App
 
-A Spring Boot REST API for bank account withdrawals. Withdrawal balances are updated transactionally, and successful withdrawals are recorded in a database outbox for asynchronous publishing to AWS SNS.
+A Java 21 / Spring Boot REST API for bank account withdrawals. The application validates and debits account balances transactionally, uses optimistic locking for concurrent requests, supports idempotent client retries, records account changes for auditing, and publishes successful withdrawal events asynchronously through an AWS SNS outbox.
+
+## Features
+
+- **Safe withdrawals:** rejects invalid amounts, missing accounts, and insufficient balances. Withdrawals update the `Accounts` JPA entity using its optimistic-lock version.
+- **Concurrency handling:** retries optimistic-lock conflicts with bounded backoff; a conflict that still cannot be resolved returns `409 CONCURRENT_WITHDRAWAL`.
+- **Idempotency:** stores the original successful response under an account-scoped `Idempotency-Key`. A retry with the same account, key, and amount replays that response; reusing the key with a different amount returns `409 IDEMPOTENCY_KEY_REUSED`.
+- **Atomic event recording:** commits the account debit, idempotency record, and outbox event in the same database transaction.
+- **Audit history:** Hibernate Envers records account revisions, which can be queried through `AccountsAuditService`.
+- **Reliable asynchronous publishing:** a scheduled dispatcher claims outbox rows, publishes them to SNS, and schedules retries after failures. Claim tokens fence off stale workers. Delivery is at least once, so consumers should deduplicate by event ID.
+
+This project does **not** currently implement API authentication or account-ownership authorization. Do not expose the withdrawal endpoint to untrusted clients or use this application for real funds until those controls are added.
 
 ## Requirements
 
@@ -23,7 +34,6 @@ OUTBOX_ENABLED=false ./gradlew bootRun
 ```
 
 When dispatch is disabled, withdrawal events remain in the outbox and are not sent.
-Outbox claims use per-claim fencing tokens so a worker whose lease has expired cannot overwrite a newer worker's state. Publishing is still at-least-once: consumers should deduplicate messages by `eventId`.
 
 To use SNS, set the topic ARN and optionally the AWS region:
 
@@ -47,7 +57,7 @@ curl -X POST \
   'http://localhost:8080/bank/withdraw?accountId=101&amount=25.50'
 ```
 
-The key is scoped to the account and stored with the successful withdrawal. Repeating a request with the same account, key, and amount returns the original response without debiting again. Reusing the key for a different amount returns `409 Conflict` (`IDEMPOTENCY_KEY_REUSED`). Keys must be nonblank and no longer than 128 characters.
+The key is scoped to the account and stored with the successful withdrawal. Repeating a request with the same account, key, and amount returns the original response without debiting again. Reusing the key for a different amount returns `409 Conflict` (`IDEMPOTENCY_KEY_REUSED`). Keys must be nonblank and no longer than 128 characters. Failed requests do not create a successful idempotency record.
 
 Successful response (`200 OK`):
 
@@ -88,7 +98,7 @@ Override the datasource with `DATABASE_URL`, `DATABASE_USERNAME`, and `DATABASE_
 export DATABASE_URL='jdbc:h2:file:./data/bankcashwithdrawal'
 ```
 
-`src/main/resources/schema.sql` creates the `accounts` and `withdrawal_outbox` tables. Insert accounts directly into the configured database before testing withdrawals, for example:
+`src/main/resources/schema.sql` creates the `accounts`, Envers audit, `withdrawal_idempotency`, and `withdrawal_outbox` tables. Insert accounts directly into the configured database before testing withdrawals, for example:
 
 ```sql
 INSERT INTO accounts (id, balance) VALUES (101, 250.00);
@@ -106,7 +116,9 @@ The `Accounts` entity is audited with Hibernate Envers. Account changes made thr
 
 The account debit and outbox insert run in the same transaction. A scheduled dispatcher claims pending outbox rows and publishes them to SNS. Failed publishes are returned to the pending state with exponential retry delays, capped at five minutes. Published messages include the stable outbox event ID as an SNS message attribute.
 
-Accounts have a `version` column. The account repository reads a balance/version snapshot and debits with a compare-and-set update that requires the version to remain unchanged, increments it on success, and checks that the balance covers the withdrawal. On a version conflict, the service reloads the account and retries; if the bounded retries are exhausted, the API returns `409 Conflict`. This prevents concurrent requests from spending the same funds. Outbox claims use conditional updates and per-claim lock tokens so concurrent dispatchers cannot own the same active claim, and an expired worker cannot update a claim after another worker has reclaimed it.
+Accounts have a `version` column managed by JPA optimistic locking. On a version conflict, the service retries the withdrawal with bounded randomized backoff; if retries are exhausted, the API returns `409 Conflict`. This prevents concurrent requests from spending the same funds.
+
+Outbox claims use conditional updates and unique per-claim lock tokens. Mark-published and retry updates require the current token, preventing an expired worker from changing a claim after another worker has reclaimed it.
 
 Delivery is **at least once**: a process failure after SNS accepts a message but before the outbox row is marked published can cause the message to be sent again. Consumers should deduplicate using the event ID.
 
@@ -129,7 +141,8 @@ org.example.bankcashwithdrawalapp
 ├── event        Withdrawal event model
 ├── exception    Domain exceptions
 ├── messaging    SNS publisher interface and implementation
-├── repository   Account and outbox persistence
+├── entity       JPA Accounts entity with optimistic locking and Envers auditing
+├── repository   Account, idempotency, and outbox persistence
 ├── rest         HTTP controller, response DTO, and API error handling
 └── service      Withdrawal, audit-history query, and outbox dispatcher
 ```
@@ -142,4 +155,4 @@ Run the test suite with:
 ./gradlew test
 ```
 
-Unit tests use Mockito to isolate the withdrawal service, outbox dispatcher, and REST controller. Integration tests use H2 and cover persistence-backed withdrawals, validation, missing accounts, insufficient funds, account audit history, concurrent withdrawals, competing outbox claims, and dispatch/retry behavior.
+Unit tests use Mockito to isolate the withdrawal service, outbox dispatcher, and REST controller. Integration tests use H2 and cover persistence-backed withdrawals, validation, missing accounts, insufficient funds, idempotent replay and key conflicts, concurrent withdrawals and duplicate requests, account audit history, stale outbox claim fencing, and dispatch/retry behavior.
