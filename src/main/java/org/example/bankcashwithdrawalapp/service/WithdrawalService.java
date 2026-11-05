@@ -43,7 +43,7 @@ public class WithdrawalService {
                     InsufficientFundsException.class,
                     InvalidWithdrawalException.class
             },
-            maxAttempts = 13,
+            maxAttempts = 5,
             backoff = @Backoff(delay = 10, maxDelay = 200, multiplier = 2)
     )
     public WithdrawalEvent withdraw(Long accountId, BigDecimal amount) {

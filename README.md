@@ -137,4 +137,4 @@ Run the test suite with:
 ./gradlew test
 ```
 
-The integration tests use H2 and cover successful withdrawals, validation, missing accounts, insufficient funds, account audit history, concurrent withdrawals, competing outbox claims, and dispatch/retry behavior.
+Unit tests use Mockito to isolate the withdrawal service, outbox dispatcher, and REST controller. Integration tests use H2 and cover persistence-backed withdrawals, validation, missing accounts, insufficient funds, account audit history, concurrent withdrawals, competing outbox claims, and dispatch/retry behavior.
