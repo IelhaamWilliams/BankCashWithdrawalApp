@@ -38,12 +38,15 @@ Configure AWS credentials using a supported AWS SDK mechanism, such as environme
 
 ### Withdraw funds
 
-`POST /bank/withdraw` accepts the existing query parameters `accountId` and `amount`:
+`POST /bank/withdraw` accepts the query parameters `accountId` and `amount`, and requires an `Idempotency-Key` header:
 
 ```bash
 curl -X POST \
+  -H 'Idempotency-Key: withdrawal-101-2026-11-03-001' \
   'http://localhost:8080/bank/withdraw?accountId=101&amount=25.50'
 ```
+
+The key is scoped to the account and stored with the successful withdrawal. Repeating a request with the same account, key, and amount returns the original response without debiting again. Reusing the key for a different amount returns `409 Conflict` (`IDEMPOTENCY_KEY_REUSED`). Keys must be nonblank and no longer than 128 characters.
 
 Successful response (`200 OK`):
 
@@ -67,6 +70,7 @@ Errors use a JSON body with `code` and `message`:
 | `400 Bad Request` | `INVALID_WITHDRAWAL` | The account ID or amount is invalid |
 | `404 Not Found` | `ACCOUNT_NOT_FOUND` | No account has the supplied ID |
 | `409 Conflict` | `CONCURRENT_WITHDRAWAL` | The account changed repeatedly during optimistic-lock retries; retry the request |
+| `409 Conflict` | `IDEMPOTENCY_KEY_REUSED` | The idempotency key was already used with a different amount |
 | `422 Unprocessable Entity` | `INSUFFICIENT_FUNDS` | The account does not have enough funds |
 
 ## Database configuration

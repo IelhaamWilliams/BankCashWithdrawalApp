@@ -8,6 +8,7 @@ import org.example.bankcashwithdrawalapp.exception.InsufficientFundsException;
 import org.example.bankcashwithdrawalapp.exception.InvalidWithdrawalException;
 import org.example.bankcashwithdrawalapp.repository.AccountRepository;
 import org.example.bankcashwithdrawalapp.repository.OutboxRepository;
+import org.example.bankcashwithdrawalapp.repository.WithdrawalIdempotencyRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -25,18 +26,23 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-class WithdrawalServiceTest {
+class WithdrawalTransactionServiceTest {
     private static final long ACCOUNT_ID = 101L;
+    private static final String IDEMPOTENCY_KEY = "request-1";
 
     private AccountRepository accountRepository;
     private OutboxRepository outboxRepository;
-    private WithdrawalService withdrawalService;
+    private WithdrawalIdempotencyRepository idempotencyRepository;
+    private WithdrawalTransactionService withdrawalService;
 
     @BeforeEach
     void setUp() {
         accountRepository = mock(AccountRepository.class);
         outboxRepository = mock(OutboxRepository.class);
-        withdrawalService = new WithdrawalService(accountRepository, outboxRepository);
+        idempotencyRepository = mock(WithdrawalIdempotencyRepository.class);
+        withdrawalService = new WithdrawalTransactionService(
+                accountRepository, outboxRepository, idempotencyRepository
+        );
     }
 
     @Test
@@ -46,7 +52,9 @@ class WithdrawalServiceTest {
         when(accountRepository.debitIfVersionMatches(ACCOUNT_ID, new BigDecimal("25.50"), 0L))
                 .thenReturn(true);
 
-        WithdrawalEvent response = withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("25.50"));
+        WithdrawalEvent response = withdrawalService.withdraw(
+                ACCOUNT_ID, new BigDecimal("25.50"), IDEMPOTENCY_KEY
+        );
 
         assertEquals(ACCOUNT_ID, response.accountId());
         assertEquals(0, new BigDecimal("25.50").compareTo(response.amount()));
@@ -54,6 +62,7 @@ class WithdrawalServiceTest {
         assertNotNull(response.eventId());
         assertNotNull(response.occurredAt());
         verify(accountRepository).debitIfVersionMatches(ACCOUNT_ID, new BigDecimal("25.50"), 0L);
+        verify(idempotencyRepository).save(IDEMPOTENCY_KEY, response);
 
         ArgumentCaptor<WithdrawalEvent> eventCaptor = ArgumentCaptor.forClass(WithdrawalEvent.class);
         verify(outboxRepository).enqueue(eventCaptor.capture());
@@ -66,7 +75,7 @@ class WithdrawalServiceTest {
 
         assertThrows(
                 AccountNotFoundException.class,
-                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"))
+                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"), IDEMPOTENCY_KEY)
         );
 
         verify(accountRepository, never()).debitIfVersionMatches(any(), any(), any());
@@ -80,7 +89,7 @@ class WithdrawalServiceTest {
 
         assertThrows(
                 InsufficientFundsException.class,
-                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"))
+                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"), IDEMPOTENCY_KEY)
         );
 
         verify(accountRepository, never()).debitIfVersionMatches(any(), any(), any());
@@ -96,7 +105,7 @@ class WithdrawalServiceTest {
 
         assertThrows(
                 ConcurrentWithdrawalException.class,
-                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"))
+                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"), IDEMPOTENCY_KEY)
         );
 
         verifyNoInteractions(outboxRepository);
@@ -106,13 +115,13 @@ class WithdrawalServiceTest {
     void withdrawRejectsInvalidAmountsBeforeAccessingRepositories() {
         assertThrows(
                 InvalidWithdrawalException.class,
-                () -> withdrawalService.withdraw(ACCOUNT_ID, BigDecimal.ZERO)
+                () -> withdrawalService.withdraw(ACCOUNT_ID, BigDecimal.ZERO, IDEMPOTENCY_KEY)
         );
         assertThrows(
                 InvalidWithdrawalException.class,
-                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("1.001"))
+                () -> withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("1.001"), IDEMPOTENCY_KEY)
         );
 
-        verifyNoInteractions(accountRepository, outboxRepository);
+        verifyNoInteractions(accountRepository, outboxRepository, idempotencyRepository);
     }
 }

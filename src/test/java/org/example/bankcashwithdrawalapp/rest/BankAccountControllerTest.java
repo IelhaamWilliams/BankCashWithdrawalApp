@@ -1,7 +1,7 @@
 package org.example.bankcashwithdrawalapp.rest;
 
 import org.example.bankcashwithdrawalapp.event.WithdrawalEvent;
-import org.example.bankcashwithdrawalapp.service.WithdrawalService;
+import org.example.bankcashwithdrawalapp.service.WithdrawalTransactionService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -18,13 +18,14 @@ import static org.mockito.Mockito.when;
 class BankAccountControllerTest {
     private static final long ACCOUNT_ID = 101L;
     private static final BigDecimal AMOUNT = new BigDecimal("25.50");
+    private static final String IDEMPOTENCY_KEY = "controller-request";
 
-    private WithdrawalService withdrawalService;
+    private WithdrawalTransactionService withdrawalService;
     private BankAccountController controller;
 
     @BeforeEach
     void setUp() {
-        withdrawalService = mock(WithdrawalService.class);
+        withdrawalService = mock(WithdrawalTransactionService.class);
         controller = new BankAccountController(withdrawalService);
     }
 
@@ -37,15 +38,15 @@ class BankAccountControllerTest {
                 "SUCCESSFUL",
                 Instant.now()
         );
-        when(withdrawalService.withdraw(ACCOUNT_ID, AMOUNT)).thenReturn(event);
+        when(withdrawalService.withdraw(ACCOUNT_ID, AMOUNT, IDEMPOTENCY_KEY)).thenReturn(event);
 
-        var response = controller.withdraw(ACCOUNT_ID, AMOUNT);
+        var response = controller.withdraw(ACCOUNT_ID, AMOUNT, IDEMPOTENCY_KEY);
 
         assertEquals(200, response.getStatusCode().value());
         assertEquals(ACCOUNT_ID, response.getBody().accountId());
         assertEquals(0, AMOUNT.compareTo(response.getBody().amount()));
         assertEquals("SUCCESSFUL", response.getBody().status());
         assertSame(event.eventId(), response.getBody().eventId());
-        verify(withdrawalService).withdraw(ACCOUNT_ID, AMOUNT);
+        verify(withdrawalService).withdraw(ACCOUNT_ID, AMOUNT, IDEMPOTENCY_KEY);
     }
 }

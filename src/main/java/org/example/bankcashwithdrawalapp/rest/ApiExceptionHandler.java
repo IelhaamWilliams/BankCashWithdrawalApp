@@ -3,10 +3,12 @@ package org.example.bankcashwithdrawalapp.rest;
 import org.example.bankcashwithdrawalapp.exception.AccountNotFoundException;
 import org.example.bankcashwithdrawalapp.exception.ConcurrentWithdrawalException;
 import org.example.bankcashwithdrawalapp.exception.InsufficientFundsException;
+import org.example.bankcashwithdrawalapp.exception.IdempotencyKeyReuseException;
 import org.example.bankcashwithdrawalapp.exception.InvalidWithdrawalException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -19,10 +21,16 @@ public class ApiExceptionHandler {
                 .body(new ApiError("INVALID_WITHDRAWAL", exception.getMessage()));
     }
 
-    @ExceptionHandler({MissingServletRequestParameterException.class, MethodArgumentTypeMismatchException.class})
+    @ExceptionHandler({
+            MissingServletRequestParameterException.class,
+            MissingRequestHeaderException.class,
+            MethodArgumentTypeMismatchException.class
+    })
     public ResponseEntity<ApiError> handleInvalidRequest(Exception exception) {
         String message = exception instanceof MissingServletRequestParameterException missingParameter
                 ? "Required parameter '%s' is missing".formatted(missingParameter.getParameterName())
+                : exception instanceof MissingRequestHeaderException missingHeader
+                ? "Required header '%s' is missing".formatted(missingHeader.getHeaderName())
                 : "A request parameter has an invalid value";
         return ResponseEntity.status(HttpStatus.BAD_REQUEST)
                 .body(new ApiError("INVALID_REQUEST", message));
@@ -44,6 +52,12 @@ public class ApiExceptionHandler {
     public ResponseEntity<ApiError> handleConcurrentWithdrawal(ConcurrentWithdrawalException exception) {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(new ApiError("CONCURRENT_WITHDRAWAL", exception.getMessage()));
+    }
+
+    @ExceptionHandler(IdempotencyKeyReuseException.class)
+    public ResponseEntity<ApiError> handleIdempotencyKeyReuse(IdempotencyKeyReuseException exception) {
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ApiError("IDEMPOTENCY_KEY_REUSED", exception.getMessage()));
     }
 
     public record ApiError(String code, String message) {

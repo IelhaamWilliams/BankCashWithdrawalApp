@@ -4,6 +4,7 @@ import org.example.bankcashwithdrawalapp.entity.Accounts;
 import org.example.bankcashwithdrawalapp.exception.ConcurrentWithdrawalException;
 import org.example.bankcashwithdrawalapp.repository.AccountRepository;
 import org.example.bankcashwithdrawalapp.repository.OutboxRepository;
+import org.example.bankcashwithdrawalapp.repository.WithdrawalIdempotencyRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,7 +36,7 @@ class WithdrawalRetryTest {
     private OutboxRepository outboxRepository;
 
     @Autowired
-    private WithdrawalService withdrawalService;
+    private WithdrawalTransactionService withdrawalService;
 
     @BeforeEach
     void setUp() {
@@ -50,11 +51,11 @@ class WithdrawalRetryTest {
     void exhaustedConcurrentWithdrawalRetriesReturnConflictException() {
         assertThrows(
                 ConcurrentWithdrawalException.class,
-                () -> withdrawalService.withdraw(ACCOUNT_ID, AMOUNT)
+                () -> withdrawalService.withdraw(ACCOUNT_ID, AMOUNT, "retry-test")
         );
 
-        verify(accountRepository, times(5)).findById(ACCOUNT_ID);
-        verify(accountRepository, times(5)).debitIfVersionMatches(ACCOUNT_ID, AMOUNT, 0L);
+        verify(accountRepository, times(10)).findById(ACCOUNT_ID);
+        verify(accountRepository, times(10)).debitIfVersionMatches(ACCOUNT_ID, AMOUNT, 0L);
         verifyNoInteractions(outboxRepository);
     }
 
@@ -72,11 +73,17 @@ class WithdrawalRetryTest {
         }
 
         @Bean
-        WithdrawalService withdrawalService(
+        WithdrawalIdempotencyRepository withdrawalIdempotencyRepository() {
+            return mock(WithdrawalIdempotencyRepository.class);
+        }
+
+        @Bean
+        WithdrawalTransactionService withdrawalTransactionService(
                 AccountRepository accountRepository,
-                OutboxRepository outboxRepository
+                OutboxRepository outboxRepository,
+                WithdrawalIdempotencyRepository idempotencyRepository
         ) {
-            return new WithdrawalService(accountRepository, outboxRepository);
+            return new WithdrawalTransactionService(accountRepository, outboxRepository, idempotencyRepository);
         }
     }
 }
