@@ -8,6 +8,8 @@ import org.example.bankcashwithdrawalapp.exception.InvalidWithdrawalException;
 import org.example.bankcashwithdrawalapp.entity.Accounts;
 import org.example.bankcashwithdrawalapp.repository.AccountRepository;
 import org.example.bankcashwithdrawalapp.repository.OutboxRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +24,8 @@ import java.util.UUID;
 
 @Service
 public class WithdrawalService {
+    private static final Logger LOGGER = LoggerFactory.getLogger(WithdrawalService.class);
+
     private final AccountRepository accountRepository;
     private final OutboxRepository outboxRepository;
 
@@ -73,12 +77,27 @@ public class WithdrawalService {
     }
 
     @Recover
-    public WithdrawalEvent recoverOptimisticLock(
+    public WithdrawalEvent recoverConcurrentWithdrawal(
             OptimisticLockingFailureException exception,
             Long accountId,
             BigDecimal amount
     ) {
+        LOGGER
+                .error("Withdrawal failed after all retry attempts for account {}, Reason: {}",
+                        accountId, exception.getMessage());
         throw new ConcurrentWithdrawalException(accountId);
+    }
+
+    @Recover
+    public WithdrawalEvent recoverConcurrentWithdrawal(
+            ConcurrentWithdrawalException exception,
+            Long accountId,
+            BigDecimal amount
+    ) {
+        LOGGER
+                .error("Withdrawal failed after all retry attempts for account {}, Reason: {}",
+                        accountId, exception.getMessage());
+        throw exception;
     }
 
     private BigDecimal validateAndNormalize(Long accountId, BigDecimal amount) {
