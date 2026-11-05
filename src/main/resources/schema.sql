@@ -33,3 +33,13 @@ CREATE TABLE IF NOT EXISTS withdrawal_outbox (
     published_at TIMESTAMP,
     last_error VARCHAR(1000)
 );
+
+CREATE TABLE IF NOT EXISTS withdrawal_idempotency (
+    account_id BIGINT NOT NULL,
+    idempotency_key VARCHAR(128) NOT NULL,
+    amount DECIMAL(19, 2) NOT NULL,
+    event_id VARCHAR(36) NOT NULL UNIQUE,
+    status VARCHAR(16) NOT NULL,
+    occurred_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (account_id, idempotency_key)
+);
