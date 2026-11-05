@@ -23,6 +23,7 @@ OUTBOX_ENABLED=false ./gradlew bootRun
 ```
 
 When dispatch is disabled, withdrawal events remain in the outbox and are not sent.
+Outbox claims use per-claim fencing tokens so a worker whose lease has expired cannot overwrite a newer worker's state. Publishing is still at-least-once: consumers should deduplicate messages by `eventId`.
 
 To use SNS, set the topic ARN and optionally the AWS region:
 

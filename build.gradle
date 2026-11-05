@@ -27,7 +27,6 @@ dependencies {
     implementation 'org.hibernate.orm:hibernate-envers'
 
     implementation(platform("software.amazon.awssdk:bom:2.25.0"))
-    implementation 'software.amazon.awssdk:s3'
     implementation 'software.amazon.awssdk:sns'
 
     runtimeOnly 'com.h2database:h2'

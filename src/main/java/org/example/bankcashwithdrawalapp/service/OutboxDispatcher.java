@@ -48,7 +48,7 @@ public class OutboxDispatcher {
                 LOGGER.warn("SNS publish for outbox event {} failed; retry scheduled", message.eventId(), exception);
                 continue;
             }
-            outboxRepository.markPublished(message.eventId());
+            outboxRepository.markPublished(message.eventId(), message.lockToken());
         }
     }
 }

@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
@@ -22,6 +23,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -277,6 +279,41 @@ class WithdrawalFlowIntegrationTests {
         assertEquals("SNS unavailable", jdbcTemplate.queryForObject(
                 "SELECT last_error FROM withdrawal_outbox",
                 String.class
+        ));
+    }
+
+    @Test
+    void expiredOutboxClaimCannotUpdateTheNewClaim() {
+        withdrawalService.withdraw(ACCOUNT_ID, new BigDecimal("10.00"), "outbox-fencing-request");
+
+        var firstClaim = outboxRepository.claimBatch(1, Duration.ofSeconds(60)).getFirst();
+        jdbcTemplate.update(
+                "UPDATE withdrawal_outbox SET locked_until = CURRENT_TIMESTAMP - INTERVAL '1' SECOND WHERE event_id = ?",
+                firstClaim.eventId()
+        );
+        var secondClaim = outboxRepository.claimBatch(1, Duration.ofSeconds(60)).getFirst();
+
+        assertTrue(!firstClaim.lockToken().equals(secondClaim.lockToken()));
+        assertThrows(
+                DataAccessException.class,
+                () -> outboxRepository.markPublished(firstClaim.eventId(), firstClaim.lockToken())
+        );
+        assertThrows(
+                DataAccessException.class,
+                () -> outboxRepository.scheduleRetry(firstClaim, new IllegalStateException("stale worker"))
+        );
+        assertEquals(secondClaim.lockToken(), jdbcTemplate.queryForObject(
+                "SELECT lock_token FROM withdrawal_outbox WHERE event_id = ?",
+                String.class,
+                firstClaim.eventId()
+        ));
+
+        outboxRepository.markPublished(secondClaim.eventId(), secondClaim.lockToken());
+        assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM withdrawal_outbox WHERE event_id = ? AND status = 'PUBLISHED' "
+                        + "AND lock_token IS NULL",
+                Integer.class,
+                firstClaim.eventId()
         ));
     }
 

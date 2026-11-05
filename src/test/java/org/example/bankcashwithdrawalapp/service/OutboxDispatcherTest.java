@@ -19,7 +19,7 @@ import static org.mockito.Mockito.when;
 
 class OutboxDispatcherTest {
     private static final OutboxMessage MESSAGE =
-            new OutboxMessage("event-123", "{\"accountId\":101}", 1);
+            new OutboxMessage("event-123", "{\"accountId\":101}", 1, "claim-token");
 
     private OutboxRepository outboxRepository;
     private WithdrawalEventPublisher eventPublisher;
@@ -40,7 +40,7 @@ class OutboxDispatcherTest {
         dispatcher.dispatchPendingEvents();
 
         verify(eventPublisher).publish(MESSAGE.eventId(), MESSAGE.payload());
-        verify(outboxRepository).markPublished(MESSAGE.eventId());
+        verify(outboxRepository).markPublished(MESSAGE.eventId(), MESSAGE.lockToken());
         verify(outboxRepository, never()).scheduleRetry(eq(MESSAGE), any(RuntimeException.class));
     }
 
@@ -55,7 +55,7 @@ class OutboxDispatcherTest {
         dispatcher.dispatchPendingEvents();
 
         verify(outboxRepository).scheduleRetry(MESSAGE, failure);
-        verify(outboxRepository, never()).markPublished(MESSAGE.eventId());
+        verify(outboxRepository, never()).markPublished(MESSAGE.eventId(), MESSAGE.lockToken());
     }
 
     @Test

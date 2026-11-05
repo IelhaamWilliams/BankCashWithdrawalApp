@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 @Repository
 public class OutboxRepository {
@@ -52,7 +53,8 @@ public class OutboxRepository {
                 (resultSet, rowNumber) -> new OutboxMessage(
                         resultSet.getString("event_id"),
                         resultSet.getString("payload"),
-                        resultSet.getInt("attempt_count") + 1
+                        resultSet.getInt("attempt_count") + 1,
+                        null
                 ),
                 nowTimestamp,
                 nowTimestamp,
@@ -62,37 +64,47 @@ public class OutboxRepository {
         List<OutboxMessage> claimed = new ArrayList<>();
         Timestamp lockedUntil = Timestamp.from(now.plus(leaseDuration));
         for (OutboxMessage candidate : candidates) {
+            String lockToken = UUID.randomUUID().toString();
             int rowsUpdated = jdbcTemplate.update(
                     """
                     UPDATE withdrawal_outbox
                     SET status = 'PROCESSING',
                         attempt_count = attempt_count + 1,
-                        locked_until = ?
+                        locked_until = ?,
+                        lock_token = ?
                     WHERE event_id = ?
                       AND ((status = 'PENDING' AND next_attempt_at <= ?)
                         OR (status = 'PROCESSING' AND locked_until <= ?))
                     """,
                     lockedUntil,
+                    lockToken,
                     candidate.eventId(),
                     nowTimestamp,
                     nowTimestamp
             );
             if (rowsUpdated == 1) {
-                claimed.add(candidate);
+                claimed.add(new OutboxMessage(
+                        candidate.eventId(),
+                        candidate.payload(),
+                        candidate.attemptCount(),
+                        lockToken
+                ));
             }
         }
         return claimed;
     }
 
-    public void markPublished(String eventId) {
+    public void markPublished(String eventId, String lockToken) {
         int rowsUpdated = jdbcTemplate.update(
                 """
                 UPDATE withdrawal_outbox
-                SET status = 'PUBLISHED', published_at = ?, locked_until = NULL, last_error = NULL
-                WHERE event_id = ? AND status = 'PROCESSING'
+                SET status = 'PUBLISHED', published_at = ?, locked_until = NULL,
+                    lock_token = NULL, last_error = NULL
+                WHERE event_id = ? AND status = 'PROCESSING' AND lock_token = ?
                 """,
                 Timestamp.from(Instant.now()),
-                eventId
+                eventId,
+                lockToken
         );
         requireClaimedEventUpdate(eventId, rowsUpdated);
     }
@@ -113,12 +125,14 @@ public class OutboxRepository {
                 SET status = 'PENDING',
                     next_attempt_at = ?,
                     locked_until = NULL,
+                    lock_token = NULL,
                     last_error = ?
-                WHERE event_id = ? AND status = 'PROCESSING'
+                WHERE event_id = ? AND status = 'PROCESSING' AND lock_token = ?
                 """,
                 Timestamp.from(Instant.now().plusSeconds(retryDelaySeconds)),
                 errorMessage,
-                message.eventId()
+                message.eventId(),
+                message.lockToken()
         );
         requireClaimedEventUpdate(message.eventId(), rowsUpdated);
     }
@@ -129,6 +143,6 @@ public class OutboxRepository {
         }
     }
 
-    public record OutboxMessage(String eventId, String payload, int attemptCount) {
+    public record OutboxMessage(String eventId, String payload, int attemptCount, String lockToken) {
     }
 }
