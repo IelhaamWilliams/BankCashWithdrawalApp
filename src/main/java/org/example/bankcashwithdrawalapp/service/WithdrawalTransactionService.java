@@ -137,8 +137,20 @@ public class WithdrawalTransactionService {
             BigDecimal amount,
             String idempotencyKey
     ) {
-        LOGGER.error("Unable to resolve concurrent idempotency-key request for account {}", accountId, exception);
-        throw new IdempotencyKeyReuseException();
+        var stored = idempotencyRepository.find(accountId, idempotencyKey);
+        if (stored.isPresent()) {
+            StoredWithdrawal existing = stored.get();
+            if (existing.amount().compareTo(amount) == 0) {
+                LOGGER.info("Replaying successful withdrawal after concurrent idempotency-key retries for account {}",
+                        accountId);
+                return existing.event();
+            }
+            throw new IdempotencyKeyReuseException();
+        }
+
+        LOGGER.error("Unable to resolve concurrent withdrawal after duplicate-key retries for account {}",
+                accountId, exception);
+        throw new ConcurrentWithdrawalException(accountId);
     }
 
     private BigDecimal validateAndNormalize(Long accountId, BigDecimal amount, String idempotencyKey) {

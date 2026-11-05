@@ -2,8 +2,11 @@ package org.example.bankcashwithdrawalapp.service;
 
 import org.example.bankcashwithdrawalapp.entity.Accounts;
 import org.example.bankcashwithdrawalapp.exception.ConcurrentWithdrawalException;
+import org.example.bankcashwithdrawalapp.event.WithdrawalEvent;
 import org.example.bankcashwithdrawalapp.repository.AccountRepository;
 import org.example.bankcashwithdrawalapp.repository.OutboxRepository;
+import org.example.bankcashwithdrawalapp.repository.WithdrawalIdempotencyRepository;
+import org.example.bankcashwithdrawalapp.repository.WithdrawalIdempotencyRepository.StoredWithdrawal;
 import org.example.bankcashwithdrawalapp.repository.WithdrawalIdempotencyRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -14,9 +17,16 @@ import org.springframework.retry.annotation.EnableRetry;
 import org.springframework.test.context.junit.jupiter.SpringJUnitConfig;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.Optional;
+import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -36,11 +46,15 @@ class WithdrawalRetryTest {
     private OutboxRepository outboxRepository;
 
     @Autowired
+    private WithdrawalIdempotencyRepository idempotencyRepository;
+
+    @Autowired
     private WithdrawalTransactionService withdrawalService;
 
     @BeforeEach
     void setUp() {
-        reset(accountRepository, outboxRepository);
+        reset(accountRepository, outboxRepository, idempotencyRepository);
+        when(idempotencyRepository.find(ACCOUNT_ID, "retry-test")).thenReturn(Optional.empty());
         when(accountRepository.findById(ACCOUNT_ID))
                 .thenReturn(Optional.of(new Accounts(ACCOUNT_ID, new BigDecimal("100.00"))));
         when(accountRepository.debitIfVersionMatches(ACCOUNT_ID, AMOUNT, 0L))
@@ -56,6 +70,40 @@ class WithdrawalRetryTest {
 
         verify(accountRepository, times(10)).findById(ACCOUNT_ID);
         verify(accountRepository, times(10)).debitIfVersionMatches(ACCOUNT_ID, AMOUNT, 0L);
+        verifyNoInteractions(outboxRepository);
+    }
+
+    @Test
+    void exhaustedDuplicateKeyRetriesReplayTheWinningSameAmountRequest() {
+        WithdrawalEvent winningEvent = new WithdrawalEvent(
+                UUID.randomUUID(),
+                ACCOUNT_ID,
+                AMOUNT,
+                "SUCCESSFUL",
+                Instant.now()
+        );
+        when(idempotencyRepository.find(ACCOUNT_ID, "retry-test"))
+                .thenReturn(
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.empty(),
+                        Optional.of(new StoredWithdrawal(AMOUNT, winningEvent))
+                );
+        doThrow(new org.springframework.dao.DuplicateKeyException("duplicate key"))
+                .when(idempotencyRepository).save(eq("retry-test"), any(WithdrawalEvent.class));
+
+        WithdrawalEvent response = withdrawalService.withdraw(ACCOUNT_ID, AMOUNT, "retry-test");
+
+        assertEquals(winningEvent, response);
+        verify(idempotencyRepository, times(10)).save(eq("retry-test"), any(WithdrawalEvent.class));
+        verify(accountRepository, never()).debitIfVersionMatches(ACCOUNT_ID, AMOUNT, 0L);
         verifyNoInteractions(outboxRepository);
     }
 
